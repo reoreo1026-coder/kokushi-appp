@@ -122,6 +122,35 @@ def get_leaderboard():
     rows = result.get("leaderboard", [])
     return rows if isinstance(rows, list) else []
 
+
+
+def load_shared_custom_questions():
+    """Google Apps Scriptから全ユーザー共通の追加問題を取得する。"""
+    result = sheets_get({"action": "list_custom_questions"})
+    if not result:
+        return []
+    rows = result.get("questions", [])
+    return rows if isinstance(rows, list) else []
+
+
+def save_shared_custom_questions(questions):
+    """管理者が承認した追加問題をGoogle Apps Scriptへ保存する。"""
+    if not sheets_url_ready():
+        return False, "Google Sheets連携URLが設定されていません。"
+    try:
+        response = requests.post(
+            API_URL,
+            json={"action": "save_custom_questions", "questions": questions},
+            timeout=30,
+        )
+        response.raise_for_status()
+        result = response.json()
+        if result.get("status") == "success":
+            return True, ""
+        return False, result.get("message", "Apps Script側で保存が拒否されました。")
+    except (requests.RequestException, ValueError) as e:
+        return False, f"問題の保存に失敗しました: {e}"
+
 # =========================================================
 # ページ設定
 # =========================================================
@@ -158,6 +187,8 @@ DEFAULTS = {
     "custom_questions": [],
     "slide_sources": {},
     "pending_slide_questions": [],
+    "admin_authenticated": False,
+    "shared_custom_questions": [],
     "quiz_index": 0,
     "score": 0,
     "quiz_mode": "normal",
@@ -186,6 +217,11 @@ DEFAULTS = {
 for key, value in DEFAULTS.items():
     if key not in st.session_state:
         st.session_state[key] = value
+
+# 共有問題はセッション開始時に一度読み込み、全ユーザーの通常出題に反映する。
+if not st.session_state.get("shared_questions_loaded", False):
+    st.session_state.shared_custom_questions = load_shared_custom_questions()
+    st.session_state.shared_questions_loaded = True
 
 
 # =========================================================
@@ -1412,7 +1448,10 @@ div.stButton > button:hover {
 # スライドから問題・解説を自動作成する機能
 # =========================================================
 def get_all_questions():
-    return list(QUESTION_BANK) + list(st.session_state.get("custom_questions", []))
+    # スライドから登録した問題も通常の問題バンクに加えて出題する。
+    local = list(st.session_state.get("custom_questions", []))
+    shared = list(st.session_state.get("shared_custom_questions", []))
+    return list(QUESTION_BANK) + shared + local
 
 
 def extract_slide_pages(uploaded_file):
@@ -1502,6 +1541,14 @@ def show_source_slide(question, key_suffix="slide"):
 
 
 def show_add_questions():
+    if not st.session_state.get("admin_authenticated", False):
+        st.error("この機能は管理者専用です。")
+        if st.button("管理者ログインへ"):
+            go("admin_login")
+        if st.button("ホームへ戻る"):
+            go("home")
+        return
+
     st.markdown("## 📥 スライドから問題を追加")
     st.caption("講義スライドを読み込み、AIで五択問題を作成します。解説から根拠となったスライドを確認できます。")
     st.warning("AIが作った問題や解説には誤りが含まれる可能性があります。登録前に必ず原資料と照合してください。")
@@ -1535,17 +1582,38 @@ def show_add_questions():
                 if st.checkbox("この問題を登録する", value=True, key=f"approve_slide_q_{i}"):
                     approved.append(q)
         if st.button("📚 選択した問題を登録", type="primary", use_container_width=True):
-            existing = {q.get("question") for q in st.session_state.custom_questions}
-            additions = [q for q in approved if q.get("question") not in existing]
-            st.session_state.custom_questions.extend(additions)
-            st.session_state.pending_slide_questions = []
-            st.success(f"{len(additions)}問を登録しました。ホームの「スライド問題を解く」から出題できます。")
-    if st.session_state.get("custom_questions"):
-        st.caption(f"登録済み：{len(st.session_state.custom_questions)}問（現在のセッション内）")
-        if st.button("登録したスライド問題をすべて削除", use_container_width=True):
-            st.session_state.custom_questions = []
-            st.session_state.review_records = {k: v for k, v in st.session_state.review_records.items() if not v.get("q", {}).get("custom")}
-            st.rerun()
+            existing_questions = load_shared_custom_questions()
+            existing_texts = {q.get("question") for q in existing_questions}
+            additions = []
+            for q in approved:
+                if q.get("question") not in existing_texts:
+                    additions.append(q)
+                    existing_texts.add(q.get("question"))
+            combined = existing_questions + additions
+            ok, error_message = save_shared_custom_questions(combined)
+            if ok:
+                st.session_state.shared_custom_questions = combined
+                st.session_state.pending_slide_questions = []
+                st.success(f"{len(additions)}問を問題バンクに登録しました。通常の学習問題にも反映されます。")
+            else:
+                st.error(error_message)
+                st.info("共有保存には、下記の案内にあるApps Script側の追加対応が必要です。")
+    registered = load_shared_custom_questions()
+    st.session_state.shared_custom_questions = registered
+    st.caption(f"問題バンクに登録済み：{len(registered)}問（全ユーザー共通）")
+    if registered:
+        with st.expander("登録済みスライド問題を確認・削除"):
+            for idx, item in enumerate(registered):
+                st.write(f"{idx + 1}. [{item.get('field', 'その他')}] {item.get('question', '')}")
+                if st.button("この問題を削除", key=f"delete_shared_q_{idx}"):
+                    remaining = [q for j, q in enumerate(registered) if j != idx]
+                    ok, error_message = save_shared_custom_questions(remaining)
+                    if ok:
+                        st.session_state.shared_custom_questions = remaining
+                        st.success("問題を削除しました。")
+                        st.rerun()
+                    else:
+                        st.error(error_message)
     if st.button("🏠 ホームへ戻る", use_container_width=True):
         go("home")
 
@@ -2251,6 +2319,13 @@ STAGE 1　FIRST STEP
             go("quiz")
     if st.button("📊 問題別正答率・難易度分析", use_container_width=True):
         go("accuracy")
+    if st.session_state.get("admin_authenticated", False):
+        if st.button("🛠️ 管理者ダッシュボード", use_container_width=True):
+            go("admin")
+    else:
+        if st.button("🔐 管理者ログイン", use_container_width=True):
+            go("admin_login")
+
     bottom_navigation("home")
 
 
@@ -3077,6 +3152,89 @@ margin-top:4px;
 
 
 # =========================================================
+# 管理者ログイン・ダッシュボード
+# =========================================================
+
+def show_admin_login():
+    st.markdown("## 🔐 管理者ログイン")
+    st.caption("問題の追加・削除と管理者向けの状況確認ができます。")
+    password = st.text_input("管理者パスワード", type="password", key="admin_password_input")
+    if st.button("ログイン", type="primary", use_container_width=True):
+        try:
+            expected = st.secrets.get("ADMIN_PASSWORD", "")
+        except Exception:
+            expected = ""
+        if not expected:
+            st.error("ADMIN_PASSWORD が未設定です。Streamlit Cloud の Settings → Secrets に設定してください。")
+        elif password and hashlib.sha256(password.encode("utf-8")).hexdigest() == hashlib.sha256(str(expected).encode("utf-8")).hexdigest():
+            st.session_state.admin_authenticated = True
+            go("admin")
+        else:
+            st.error("パスワードが違います。")
+    if st.button("ホームへ戻る", use_container_width=True):
+        go("home")
+
+
+def show_admin_dashboard():
+    if not st.session_state.get("admin_authenticated", False):
+        st.warning("管理者ログインが必要です。")
+        if st.button("管理者ログインへ"):
+            go("admin_login")
+        return
+
+    st.markdown("## 🛠️ 管理者ダッシュボード")
+    st.caption("問題バンクと、このセッションでの学習状況を確認できます。")
+
+    shared_questions = load_shared_custom_questions()
+    st.session_state.shared_custom_questions = shared_questions
+    total_questions = len(QUESTION_BANK) + len(shared_questions)
+    col1, col2, col3 = st.columns(3)
+    col1.metric("基本問題", len(QUESTION_BANK))
+    col2.metric("追加問題", len(shared_questions))
+    col3.metric("問題総数", total_questions)
+
+    answered = int(st.session_state.get("total_answered", 0))
+    correct = int(st.session_state.get("total_correct", 0))
+    accuracy = round(correct / answered * 100) if answered else 0
+    st.markdown("### 📊 現在のログインユーザーの学習状況")
+    a, b, c = st.columns(3)
+    a.metric("回答数", f"{answered}問")
+    b.metric("正解数", f"{correct}問")
+    c.metric("正答率", f"{accuracy}%")
+
+    st.markdown("### 👥 ユーザーランキング")
+    leaderboard = get_leaderboard()
+    if leaderboard:
+        st.dataframe(leaderboard, use_container_width=True, hide_index=True)
+    else:
+        st.caption("ランキングデータを取得できませんでした。Apps Script側の leaderboard 対応を確認してください。")
+
+    st.markdown("### 📚 分野別の問題数")
+    field_counts = {}
+    for question in get_all_questions():
+        field_name = question.get("field", "その他")
+        field_counts[field_name] = field_counts.get(field_name, 0) + 1
+    if field_counts:
+        st.dataframe(
+            [{"分野": field_name, "問題数": count} for field_name, count in sorted(field_counts.items())],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.markdown("### ⚙️ 管理メニュー")
+    if st.button("📥 スライドから問題を追加・管理", type="primary", use_container_width=True):
+        go("add_questions")
+    if st.button("🔄 問題バンクを再読み込み", use_container_width=True):
+        st.session_state.shared_custom_questions = load_shared_custom_questions()
+        st.rerun()
+    if st.button("🔓 ログアウト", use_container_width=True):
+        st.session_state.admin_authenticated = False
+        go("home")
+    if st.button("🏠 ホームへ戻る", use_container_width=True):
+        go("home")
+
+
+# =========================================================
 # 実行
 # =========================================================
 
@@ -3088,6 +3246,12 @@ else:
 
     if st.session_state.page == "home":
         show_home()
+    elif st.session_state.page == "admin_login":
+        show_admin_login()
+    elif st.session_state.page == "admin":
+        show_admin_dashboard()
+    elif st.session_state.page == "add_questions":
+        show_add_questions()
 
     elif st.session_state.page == "quiz":
         show_quiz()
@@ -3112,9 +3276,6 @@ else:
 
     elif st.session_state.page == "accuracy":
         show_question_accuracy()
-
-    elif st.session_state.page == "add_questions":
-        show_add_questions()
 
     else:
         show_home()
