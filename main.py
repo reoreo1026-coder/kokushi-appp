@@ -3,6 +3,9 @@ import random
 import streamlit as st
 import requests
 from datetime import datetime, timedelta
+import json
+import io
+import hashlib
 
 # =========================================================
 # Googleスプレッドシート連携
@@ -152,6 +155,9 @@ DEFAULTS = {
 
     # クイズ
     "quiz_questions": [],
+    "custom_questions": [],
+    "slide_sources": {},
+    "pending_slide_questions": [],
     "quiz_index": 0,
     "score": 0,
     "quiz_mode": "normal",
@@ -1406,9 +1412,142 @@ div.stButton > button:hover {
 # スライドから問題・解説を自動作成する機能
 # =========================================================
 def get_all_questions():
-    """アプリ内に登録された国試問題を返す。"""
-    return list(QUESTION_BANK)
+    return list(QUESTION_BANK) + list(st.session_state.get("custom_questions", []))
 
+
+def extract_slide_pages(uploaded_file):
+    filename = uploaded_file.name.lower()
+    raw = uploaded_file.getvalue()
+    pages = []
+    if filename.endswith(".pdf"):
+        from pypdf import PdfReader
+        reader = PdfReader(io.BytesIO(raw))
+        for i, page in enumerate(reader.pages, start=1):
+            pages.append({"page": i, "text": (page.extract_text() or "").strip()})
+    elif filename.endswith(".pptx"):
+        from pptx import Presentation
+        prs = Presentation(io.BytesIO(raw))
+        for i, slide in enumerate(prs.slides, start=1):
+            parts = []
+            for shape in slide.shapes:
+                if getattr(shape, "has_text_frame", False) and shape.text.strip():
+                    parts.append(shape.text.strip())
+                if getattr(shape, "has_table", False):
+                    for row in shape.table.rows:
+                        parts.append(" | ".join(cell.text.strip() for cell in row.cells))
+            pages.append({"page": i, "text": "\n".join(parts).strip()})
+    else:
+        raise ValueError("PDFまたはPowerPoint（.pptx）を選択してください。")
+    return raw, pages
+
+
+def generate_questions_from_slides(pages, field, count, source_id):
+    try:
+        api_key = st.secrets.get("GEMINI_API_KEY", "")
+    except Exception:
+        api_key = ""
+    if not api_key:
+        raise RuntimeError("Gemini APIキーが未設定です。Streamlit Cloud の Settings → Secrets に GEMINI_API_KEY を設定してください。")
+    usable = [{"page": p["page"], "text": p["text"][:7000]} for p in pages if p.get("text")]
+    if not usable:
+        raise RuntimeError("スライドから文字を抽出できませんでした。画像だけのPDFはOCRが必要です。")
+    prompt = f'''あなたは診療放射線技師国家試験の教材作成アシスタントです。
+スライドの文章だけを根拠に五択問題を最大{count}問作成してください。スライドにない内容を正解根拠にしないでください。
+JSON配列のみで出力し、各要素を次の形式にしてください：{{"question":"問題文","choices":["選択肢1","選択肢2","選択肢3","選択肢4","選択肢5"],"answer":0,"explanation":"根拠を含む解説","source_page":1}}
+answerは0始まりの正解番号、source_pageは根拠スライド番号です。情報が足りなければ問題数を減らしてください。
+分野：{field}
+スライド本文：{json.dumps(usable, ensure_ascii=False)}'''
+    response = requests.post(
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
+        params={"key": api_key},
+        json={"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"responseMimeType": "application/json", "temperature": 0.2}},
+        timeout=90,
+    )
+    response.raise_for_status()
+    result = json.loads(response.json()["candidates"][0]["content"]["parts"][0]["text"])
+    valid_pages = {p["page"] for p in pages}
+    questions = []
+    for item in result:
+        choices, answer, page = item.get("choices", []), item.get("answer"), item.get("source_page")
+        if isinstance(item.get("question"), str) and len(choices) == 5 and isinstance(answer, int) and 0 <= answer < 5 and isinstance(page, int) and page in valid_pages:
+            questions.append({"field": field, "question": item["question"], "choices": [str(c) for c in choices], "answer": answer, "explanation": str(item.get("explanation", "")), "source_id": source_id, "source_page": page, "custom": True})
+    if not questions:
+        raise RuntimeError("有効な問題を作成できませんでした。スライド内容を確認して再試行してください。")
+    return questions
+
+
+def show_source_slide(question, key_suffix="slide"):
+    source = st.session_state.get("slide_sources", {}).get(question.get("source_id"))
+    if not source:
+        st.info("元スライドは現在のセッションにありません。アップロードし直してください。")
+        return
+    page_no = int(question.get("source_page", 1))
+    with st.expander(f"📄 元のスライドを見る（{source['name']}・{page_no}ページ/スライド）"):
+        if source["type"] == "pdf":
+            try:
+                import fitz
+                doc = fitz.open(stream=source["bytes"], filetype="pdf")
+                page = doc.load_page(max(0, min(page_no - 1, len(doc) - 1)))
+                pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
+                st.image(pix.tobytes("png"), caption=f"元スライド {page_no}ページ", use_container_width=True)
+                doc.close()
+            except Exception:
+                st.warning("PDFプレビューに失敗しました。原本をダウンロードしてください。")
+        else:
+            texts = source.get("texts", [])
+            if 1 <= page_no <= len(texts):
+                st.markdown(texts[page_no - 1] or "抽出できる文字がありません。")
+            st.info("PowerPointはテキスト表示です。原本をダウンロードしてスライド画像を確認してください。")
+        st.download_button("原本をダウンロード", data=source["bytes"], file_name=source["name"], mime=source["mime"], key=f"src_download_{key_suffix}_{source['id']}_{page_no}", use_container_width=True)
+
+
+def show_add_questions():
+    st.markdown("## 📥 スライドから問題を追加")
+    st.caption("講義スライドを読み込み、AIで五択問題を作成します。解説から根拠となったスライドを確認できます。")
+    st.warning("AIが作った問題や解説には誤りが含まれる可能性があります。登録前に必ず原資料と照合してください。")
+    uploaded = st.file_uploader("講義スライド（PDF / PowerPoint）", type=["pdf", "pptx"], key="slide_question_upload")
+    field = st.selectbox("分野", ["基礎医学", "放射線物理", "放射線技術", "画像工学", "X線撮影", "CT", "MRI", "核医学", "放射線治療", "放射線管理", "その他"], key="slide_question_field")
+    count = st.slider("作成する問題数", 1, 10, 5, key="slide_question_count")
+    if st.button("✨ スライドから問題を作成", type="primary", use_container_width=True, disabled=uploaded is None):
+        try:
+            raw, pages = extract_slide_pages(uploaded)
+            source_id = hashlib.sha256(raw).hexdigest()[:16]
+            ext = uploaded.name.lower().rsplit(".", 1)[-1]
+            source = {"id": source_id, "name": uploaded.name, "bytes": raw, "type": ext, "mime": uploaded.type or "application/octet-stream", "texts": [p["text"] for p in pages], "pages": pages}
+            st.session_state.slide_sources[source_id] = source
+            with st.spinner("スライドを読み取り、問題を作成しています…"):
+                st.session_state.pending_slide_questions = generate_questions_from_slides(pages, field, count, source_id)
+            st.success(f"{len(st.session_state.pending_slide_questions)}問作成しました。登録する問題を選んでください。")
+        except Exception as e:
+            st.error(f"問題を作成できませんでした：{e}")
+    pending = st.session_state.get("pending_slide_questions", [])
+    if pending:
+        approved = []
+        st.markdown("### 作成した問題の確認")
+        for i, q in enumerate(pending):
+            with st.expander(f"{i+1}. {q['question']}", expanded=(i == 0)):
+                for j, choice in enumerate(q["choices"], 1):
+                    st.write(f"{j}. {choice}")
+                st.write(f"**正解：** {q['choices'][q['answer']]}")
+                st.write(f"**解説：** {q['explanation']}")
+                st.write(f"**根拠スライド：** {q['source_page']}ページ/スライド")
+                show_source_slide(q, f"preview_{i}")
+                if st.checkbox("この問題を登録する", value=True, key=f"approve_slide_q_{i}"):
+                    approved.append(q)
+        if st.button("📚 選択した問題を登録", type="primary", use_container_width=True):
+            existing = {q.get("question") for q in st.session_state.custom_questions}
+            additions = [q for q in approved if q.get("question") not in existing]
+            st.session_state.custom_questions.extend(additions)
+            st.session_state.pending_slide_questions = []
+            st.success(f"{len(additions)}問を登録しました。ホームの「スライド問題を解く」から出題できます。")
+    if st.session_state.get("custom_questions"):
+        st.caption(f"登録済み：{len(st.session_state.custom_questions)}問（現在のセッション内）")
+        if st.button("登録したスライド問題をすべて削除", use_container_width=True):
+            st.session_state.custom_questions = []
+            st.session_state.review_records = {k: v for k, v in st.session_state.review_records.items() if not v.get("q", {}).get("custom")}
+            st.rerun()
+    if st.button("🏠 ホームへ戻る", use_container_width=True):
+        go("home")
 
 # =========================================================
 # 共通関数
@@ -2100,6 +2239,16 @@ STAGE 1　FIRST STEP
     )
 
     st.divider()
+    if st.button("➕ スライドから問題を追加する", use_container_width=True, key="home_add_slide_questions"):
+        go("add_questions")
+    if st.session_state.get("custom_questions"):
+        if st.button("📝 スライド問題を解く", use_container_width=True, key="home_solve_slide_questions"):
+            qs = list(st.session_state.custom_questions)
+            random.shuffle(qs)
+            st.session_state.quiz_questions = qs[:5]
+            st.session_state.quiz_mode = "normal"
+            reset_quiz_state()
+            go("quiz")
     if st.button("📊 問題別正答率・難易度分析", use_container_width=True):
         go("accuracy")
     bottom_navigation("home")
@@ -2451,6 +2600,9 @@ margin-top:3px;
 """,
             unsafe_allow_html=True
         )
+
+        if q.get("custom") and q.get("source_id"):
+            show_source_slide(q, f"quiz_{st.session_state.quiz_index}")
 
         # -------------------------
         # 次の問題
@@ -2960,6 +3112,9 @@ else:
 
     elif st.session_state.page == "accuracy":
         show_question_accuracy()
+
+    elif st.session_state.page == "add_questions":
+        show_add_questions()
 
     else:
         show_home()
