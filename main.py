@@ -1458,7 +1458,7 @@ answerは0始まりの正解番号、source_pageは根拠スライド番号で�
 分野：{field}
 スライド本文：{json.dumps(usable, ensure_ascii=False)}'''
     response = requests.post(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent",
         params={"key": api_key},
         json={"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"responseMimeType": "application/json", "temperature": 0.2}},
         timeout=90,
