@@ -1821,7 +1821,17 @@ def add_xp(amount):
 
 
 def start_quiz():
-    """期限到来問題と苦手問題を優先し、残りをランダム出題する。"""
+    """最新の共有問題を読み直してから、期限到来問題と苦手問題を優先出題する。"""
+    # すでに開いていたユーザーのセッションにも、管理者が追加した問題を反映する。
+    # 共有問題の読み込みキャッシュを破棄してからスプレッドシートを再取得する。
+    try:
+        st.cache_data.clear()
+    except Exception:
+        pass
+    latest_shared = load_shared_custom_questions()
+    st.session_state.shared_custom_questions = latest_shared
+    st.session_state.shared_questions_loaded = True
+
     now = datetime.now()
     records = st.session_state.review_records
 
