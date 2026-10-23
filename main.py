@@ -228,11 +228,20 @@ def save_shared_custom_questions(questions):
     if not sheets_url_ready():
         return False, "Google Sheets連携URLが設定されていません。"
     try:
+        payload_questions = []
+        for q in questions:
+            item = dict(q)
+            choices = item.get("choices")
+            if not isinstance(choices, list):
+                choices = item.get("options", [])
+            item["choices"] = choices
+            item["options"] = choices
+            payload_questions.append(item)
         response = requests.post(
             API_URL,
             json={
                 "action": "save_custom_questions",
-                "questions": questions,
+                "questions": payload_questions,
                 "admin_key": str(st.secrets.get("ADMIN_PASSWORD", "")),
             },
             timeout=30,
@@ -1785,7 +1794,25 @@ def show_add_questions():
                 if q.get("question") not in existing_texts:
                     additions.append(q)
                     existing_texts.add(q.get("question"))
-            combined = existing_questions + additions
+            # Apps Scriptの旧版・新版どちらでも選択肢を保存できるよう、
+            # choices と options の両方を持たせ、answerを0始まりの整数に統一する。
+            normalized_additions = []
+            for item in additions:
+                item = dict(item)
+                choices = item.get("choices")
+                if not isinstance(choices, list):
+                    choices = item.get("options", [])
+                item["choices"] = choices
+                item["options"] = choices
+                item["question"] = str(item.get("question", "")).strip()
+                item["answer"] = int(item.get("answer", -1))
+                item.setdefault("field", field)
+                item.setdefault("question_type", question_type)
+                item.setdefault("explanation", "")
+                item.setdefault("source", "slide")
+                item.setdefault("created_at", datetime.now().isoformat())
+                normalized_additions.append(item)
+            combined = existing_questions + normalized_additions
             ok, error_message = save_shared_custom_questions(combined)
             if ok:
                 st.session_state.shared_custom_questions = combined
