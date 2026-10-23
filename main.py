@@ -1393,8 +1393,8 @@ def add_xp(amount):
 
 def start_quiz():
 
-    # 固定問題・共有追加問題・このセッションの追加問題から最大30問を出題
-    available_questions = get_all_questions()
+    # 現在登録されている問題から最大30問を出題
+    available_questions = QUESTION_BANK
     question_count = min(30, len(available_questions))
     st.session_state.quiz_questions = random.sample(
         available_questions,
@@ -2022,9 +2022,13 @@ def show_quiz():
 
     if not st.session_state.quiz_questions:
 
+        question_count = min(30, len(QUESTION_BANK))
+        if question_count == 0:
+            st.error("問題が登録されていません。")
+            return
         st.session_state.quiz_questions = random.sample(
             QUESTION_BANK,
-            5
+            question_count
         )
 
     q = st.session_state.quiz_questions[
