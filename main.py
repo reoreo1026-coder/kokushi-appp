@@ -81,7 +81,10 @@ def save_user_progress():
 def send_result(q, selected_index, is_correct, confidence):
     """回答履歴をGoogleスプレッドシートへ送信する。"""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    answer_text = q["choices"][selected_index]
+    if q.get("question_type") == "一問一答":
+        answer_text = str(st.session_state.get(f"short_answer_{st.session_state.quiz_index}", "")).strip()
+    else:
+        answer_text = q["choices"][selected_index]
     correct_text = q["choices"][q["answer"]]
     result_text = "正解" if is_correct else "不正解"
 
@@ -124,6 +127,31 @@ def get_leaderboard():
 
 
 
+def load_admin_dashboard_data():
+    """管理者認証付きで、スプレッドシート上の全ユーザー学習状況を取得する。"""
+    if not sheets_url_ready():
+        return None, "Google Sheets連携URLが設定されていません。"
+    try:
+        admin_password = str(st.secrets.get("ADMIN_PASSWORD", ""))
+    except Exception:
+        admin_password = ""
+    if not admin_password:
+        return None, "Streamlit Cloud の Secrets に ADMIN_PASSWORD を設定してください。"
+    try:
+        response = requests.post(
+            API_URL,
+            json={"action": "admin_dashboard", "admin_key": admin_password},
+            timeout=30,
+        )
+        response.raise_for_status()
+        result = response.json()
+        if result.get("status") == "success":
+            return result, ""
+        return None, result.get("message", "管理者ダッシュボード情報を取得できませんでした。")
+    except (requests.RequestException, ValueError) as exc:
+        return None, f"スプレッドシートから学習状況を取得できませんでした：{exc}"
+
+
 def load_shared_custom_questions():
     """Google Apps Scriptから全ユーザー共通の追加問題を取得する。"""
     result = sheets_get({"action": "list_custom_questions"})
@@ -140,7 +168,11 @@ def save_shared_custom_questions(questions):
     try:
         response = requests.post(
             API_URL,
-            json={"action": "save_custom_questions", "questions": questions},
+            json={
+                "action": "save_custom_questions",
+                "questions": questions,
+                "admin_key": str(st.secrets.get("ADMIN_PASSWORD", "")),
+            },
             timeout=30,
         )
         response.raise_for_status()
@@ -1480,7 +1512,7 @@ def extract_slide_pages(uploaded_file):
     return raw, pages
 
 
-def generate_questions_from_slides(pages, field, count, source_id):
+def generate_questions_from_slides(pages, field, count, source_id, question_type="五択"):
     try:
         api_key = st.secrets.get("GEMINI_API_KEY", "")
     except Exception:
@@ -1490,10 +1522,19 @@ def generate_questions_from_slides(pages, field, count, source_id):
     usable = [{"page": p["page"], "text": p["text"][:7000]} for p in pages if p.get("text")]
     if not usable:
         raise RuntimeError("スライドから文字を抽出できませんでした。画像だけのPDFはOCRが必要です。")
+    if question_type == "○×":
+        fmt = '各要素は {"question":"問題文","choices":["○","×"],"answer":0,"explanation":"解説","source_page":1}。answerは0なら○、1なら×。'
+        kind = "○×問題"
+    elif question_type == "一問一答":
+        fmt = '各要素は {"question":"質問文","answer_text":"短い正答","explanation":"解説","source_page":1}。'
+        kind = "一問一答問題"
+    else:
+        fmt = '各要素は {"question":"問題文","choices":["選択肢1","選択肢2","選択肢3","選択肢4","選択肢5"],"answer":0,"explanation":"解説","source_page":1}。answerは0始まり。'
+        kind = "五択問題"
     prompt = f'''あなたは診療放射線技師国家試験の教材作成アシスタントです。
-スライドの文章だけを根拠に五択問題を最大{count}問作成してください。スライドにない内容を正解根拠にしないでください。
-JSON配列のみで出力し、各要素を次の形式にしてください：{{"question":"問題文","choices":["選択肢1","選択肢2","選択肢3","選択肢4","選択肢5"],"answer":0,"explanation":"根拠を含む解説","source_page":1}}
-answerは0始まりの正解番号、source_pageは根拠スライド番号です。情報が足りなければ問題数を減らしてください。
+スライドの文章だけを根拠に最大{count}問の{kind}を作成してください。スライドにない内容を正解根拠にせず、重複を避け、理解を確認する問いも含めてください。
+{fmt}
+source_pageは根拠スライド番号です。情報が足りなければ問題数を減らしてください。
 分野：{field}
 スライド本文：{json.dumps(usable, ensure_ascii=False)}'''
     response = requests.post(
@@ -1507,9 +1548,21 @@ answerは0始まりの正解番号、source_pageは根拠スライド番号で�
     valid_pages = {p["page"] for p in pages}
     questions = []
     for item in result:
-        choices, answer, page = item.get("choices", []), item.get("answer"), item.get("source_page")
-        if isinstance(item.get("question"), str) and len(choices) == 5 and isinstance(answer, int) and 0 <= answer < 5 and isinstance(page, int) and page in valid_pages:
-            questions.append({"field": field, "question": item["question"], "choices": [str(c) for c in choices], "answer": answer, "explanation": str(item.get("explanation", "")), "source_id": source_id, "source_page": page, "custom": True})
+        page, question = item.get("source_page"), item.get("question")
+        if not isinstance(question, str) or not isinstance(page, int) or page not in valid_pages:
+            continue
+        if question_type == "一問一答":
+            answer_text = str(item.get("answer_text", "")).strip()
+            if not answer_text: continue
+            choices, answer, q_type = [answer_text], 0, "一問一答"
+        elif question_type == "○×":
+            choices, answer, q_type = ["○", "×"], item.get("answer"), "○×"
+            if not isinstance(answer, int) or answer not in (0, 1): continue
+        else:
+            choices, answer, q_type = item.get("choices", []), item.get("answer"), "五択"
+            if len(choices) != 5 or not isinstance(answer, int) or not 0 <= answer < 5: continue
+            choices = [str(c) for c in choices]
+        questions.append({"field": field, "question": question, "choices": choices, "answer": answer, "question_type": q_type, "explanation": str(item.get("explanation", "")), "source_id": source_id, "source_page": page, "custom": True})
     if not questions:
         raise RuntimeError("有効な問題を作成できませんでした。スライド内容を確認して再試行してください。")
     return questions
@@ -1550,11 +1603,13 @@ def show_add_questions():
         return
 
     st.markdown("## 📥 スライドから問題を追加")
-    st.caption("講義スライドを読み込み、AIで五択問題を作成します。解説から根拠となったスライドを確認できます。")
+    st.caption("講義スライドから五択・○×・一問一答を作成できます。解説から根拠スライドも確認できます。")
     st.warning("AIが作った問題や解説には誤りが含まれる可能性があります。登録前に必ず原資料と照合してください。")
     uploaded = st.file_uploader("講義スライド（PDF / PowerPoint）", type=["pdf", "pptx"], key="slide_question_upload")
     field = st.selectbox("分野", ["基礎医学", "放射線物理", "放射線技術", "画像工学", "X線撮影", "CT", "MRI", "核医学", "放射線治療", "放射線管理", "その他"], key="slide_question_field")
-    count = st.slider("作成する問題数", 1, 10, 5, key="slide_question_count")
+    question_type = st.radio("問題形式", ["五択", "○×", "一問一答"], horizontal=True, key="slide_question_type")
+    count = st.slider("作成する問題数（スライド全体から）", 1, 50, 15, key="slide_question_count")
+    st.caption("資料の量や内容によっては指定数より少なくなる場合があります。")
     if st.button("✨ スライドから問題を作成", type="primary", use_container_width=True, disabled=uploaded is None):
         try:
             raw, pages = extract_slide_pages(uploaded)
@@ -1563,7 +1618,7 @@ def show_add_questions():
             source = {"id": source_id, "name": uploaded.name, "bytes": raw, "type": ext, "mime": uploaded.type or "application/octet-stream", "texts": [p["text"] for p in pages], "pages": pages}
             st.session_state.slide_sources[source_id] = source
             with st.spinner("スライドを読み取り、問題を作成しています…"):
-                st.session_state.pending_slide_questions = generate_questions_from_slides(pages, field, count, source_id)
+                st.session_state.pending_slide_questions = generate_questions_from_slides(pages, field, count, source_id, question_type)
             st.success(f"{len(st.session_state.pending_slide_questions)}問作成しました。登録する問題を選んでください。")
         except Exception as e:
             st.error(f"問題を作成できませんでした：{e}")
@@ -1720,9 +1775,16 @@ def show_review():
     st.caption("間違えた問題と、自信度が低かった問題をまとめています。")
 
     col1, col2, col3 = st.columns(3)
+    wrong_items = [r for r in records.values() if not r.get("last_correct", False)]
+    low_confidence_items = [r for r in records.values() if r.get("confidence") in ("自信なし", "やや自信なし")]
     col1.metric("復習対象", f"{len(items)}問")
-    col2.metric("記録済み", f"{len(records)}問")
-    col3.metric("累計回答", f"{st.session_state.total_answered}問")
+    col2.metric("間違えた問題", f"{len(wrong_items)}問")
+    col3.metric("自信度が低い問題", f"{len(low_confidence_items)}問")
+    st.caption(f"累計回答：{st.session_state.total_answered}問")
+    with st.expander("復習の種類について"):
+        st.markdown("- **間違えた問題**：直近の回答が不正解だった問題です。")
+        st.markdown("- **自信度が低い問題**：正解していても「自信なし」「やや自信なし」を選んだ問題です。")
+        st.markdown("- **復習対象**：間違い、または自信度が低い問題を表示します。")
 
     if not items:
         st.success("復習対象の問題はありません。問題を解くと、間違いや自信度に応じてここに追加されます。")
@@ -2445,14 +2507,11 @@ QUESTION
     # 選択肢
     # -------------------------
 
-    selected_choice = st.radio(
-        "選択肢",
-        q["choices"],
-        index=None,
-        key=f"choice_{st.session_state.quiz_index}",
-        label_visibility="collapsed",
-        disabled=st.session_state.answer_revealed,
-    )
+    question_type = q.get("question_type", "五択")
+    if question_type == "一問一答":
+        selected_choice = st.text_input("答えを入力", key=f"short_answer_{st.session_state.quiz_index}", placeholder="答えを入力してください", disabled=st.session_state.answer_revealed)
+    else:
+        selected_choice = st.radio("選択肢", q["choices"], index=None, key=f"choice_{st.session_state.quiz_index}", label_visibility="collapsed", disabled=st.session_state.answer_revealed)
 
     # -------------------------
     # 自信度
@@ -2492,10 +2551,10 @@ QUESTION
 
     if not st.session_state.answer_revealed:
 
-        can_reveal = (
-            selected_choice is not None
-            and confidence != "選択してください"
-        )
+        if question_type == "一問一答":
+            can_reveal = bool(str(selected_choice).strip()) and confidence != "選択してください"
+        else:
+            can_reveal = selected_choice is not None and confidence != "選択してください"
 
         if can_reveal:
 
@@ -2505,13 +2564,14 @@ QUESTION
                 use_container_width=True,
             ):
 
-                selected_index = q["choices"].index(
-                    selected_choice
-                )
-
-                is_correct = (
-                    selected_index == q["answer"]
-                )
+                if question_type == "一問一答":
+                    expected = str(q["choices"][q["answer"]]).strip().casefold()
+                    submitted = str(selected_choice).strip().casefold()
+                    is_correct = submitted == expected
+                    selected_index = 0
+                else:
+                    selected_index = q["choices"].index(selected_choice)
+                    is_correct = selected_index == q["answer"]
 
                 st.session_state.selected_answer = (
                     selected_index
@@ -3185,6 +3245,14 @@ def show_admin_dashboard():
     st.markdown("## 🛠️ 管理者ダッシュボード")
     st.caption("問題バンクと、このセッションでの学習状況を確認できます。")
 
+    quick1, quick2 = st.columns(2)
+    with quick1:
+        if st.button("➕ 問題を追加", type="primary", use_container_width=True):
+            go("add_questions")
+    with quick2:
+        if st.button("🔁 復習問題を確認", use_container_width=True):
+            go("review")
+
     shared_questions = load_shared_custom_questions()
     st.session_state.shared_custom_questions = shared_questions
     total_questions = len(QUESTION_BANK) + len(shared_questions)
@@ -3193,21 +3261,51 @@ def show_admin_dashboard():
     col2.metric("追加問題", len(shared_questions))
     col3.metric("問題総数", total_questions)
 
-    answered = int(st.session_state.get("total_answered", 0))
-    correct = int(st.session_state.get("total_correct", 0))
-    accuracy = round(correct / answered * 100) if answered else 0
-    st.markdown("### 📊 現在のログインユーザーの学習状況")
-    a, b, c = st.columns(3)
-    a.metric("回答数", f"{answered}問")
-    b.metric("正解数", f"{correct}問")
-    c.metric("正答率", f"{accuracy}%")
+    st.markdown("### 👥 ユーザー別の学習状況（Googleスプレッドシート）")
+    dashboard_data, dashboard_error = load_admin_dashboard_data()
+    if dashboard_data:
+        users = dashboard_data.get("users", [])
+        today = dashboard_data.get("today", {})
+        all_answered = sum(int(u.get("total_answered", 0) or 0) for u in users)
+        all_correct = sum(int(u.get("total_correct", 0) or 0) for u in users)
+        all_review = sum(int(u.get("review_count", 0) or 0) for u in users)
+        a, b, c, d = st.columns(4)
+        a.metric("登録ユーザー", f"{len(users)}人")
+        b.metric("全ユーザー復習対象", f"{all_review}問")
+        c.metric("累計回答数", f"{all_answered}問")
+        d.metric("累計正解数", f"{all_correct}問")
+        st.caption(f"今日の全ユーザー回答数：{int(today.get('answered', 0) or 0)}問　｜　今日の正解数：{int(today.get('correct', 0) or 0)}問")
+        if users:
+            st.dataframe(
+                [{
+                    "ユーザー名": u.get("user_name", ""),
+                    "今日の回答数": int(u.get("today_answered", 0) or 0),
+                    "今日の正解数": int(u.get("today_correct", 0) or 0),
+                    "累計回答数": int(u.get("total_answered", 0) or 0),
+                    "累計正解数": int(u.get("total_correct", 0) or 0),
+                    "累計正答率": f"{round(100 * int(u.get('total_correct', 0) or 0) / max(1, int(u.get('total_answered', 0) or 0)))}%",
+                    "復習対象": int(u.get("review_count", 0) or 0),
+                    "間違えた問題": int(u.get("wrong_count", 0) or 0),
+                    "自信度が低い問題": int(u.get("low_confidence_count", 0) or 0),
+                    "XP": int(u.get("xp", 0) or 0),
+                    "レベル": int(u.get("level", 0) or 0),
+                    "最終更新": u.get("updated_at", ""),
+                } for u in users],
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.info("ユーザー進捗がまだ保存されていません。")
+    else:
+        st.warning(dashboard_error)
+        st.caption("Apps Script側にも管理者ダッシュボード取得処理を追加して、再デプロイする必要があります。")
 
-    st.markdown("### 👥 ユーザーランキング")
+    st.markdown("### 🏆 ユーザーランキング")
     leaderboard = get_leaderboard()
     if leaderboard:
         st.dataframe(leaderboard, use_container_width=True, hide_index=True)
     else:
-        st.caption("ランキングデータを取得できませんでした。Apps Script側の leaderboard 対応を確認してください。")
+        st.caption("ランキングデータを取得できませんでした。")
 
     st.markdown("### 📚 分野別の問題数")
     field_counts = {}
