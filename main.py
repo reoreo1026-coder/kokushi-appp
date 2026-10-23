@@ -223,25 +223,42 @@ def load_shared_custom_questions():
     return normalized
 
 
+def reset_all_learning_data():
+    """管理者認証付きで追加問題・回答履歴・ユーザー進捗を初期化する。"""
+    if not sheets_url_ready():
+        return False, "Google Sheets連携URLが設定されていません。"
+    try:
+        admin_password = str(st.secrets.get("ADMIN_PASSWORD", ""))
+    except Exception:
+        admin_password = ""
+    if not admin_password:
+        return False, "ADMIN_PASSWORD が未設定です。"
+    try:
+        response = requests.post(
+            API_URL,
+            json={"action": "reset_all_data", "admin_key": admin_password},
+            timeout=30,
+        )
+        response.raise_for_status()
+        result = response.json()
+        if result.get("status") == "success":
+            st.cache_data.clear()
+            return True, result.get("message", "リセットしました。")
+        return False, result.get("message", "リセットに失敗しました。")
+    except (requests.RequestException, ValueError) as exc:
+        return False, f"リセットに失敗しました: {exc}"
+
+
 def save_shared_custom_questions(questions):
     """管理者が承認した追加問題をGoogle Apps Scriptへ保存する。"""
     if not sheets_url_ready():
         return False, "Google Sheets連携URLが設定されていません。"
     try:
-        payload_questions = []
-        for q in questions:
-            item = dict(q)
-            choices = item.get("choices")
-            if not isinstance(choices, list):
-                choices = item.get("options", [])
-            item["choices"] = choices
-            item["options"] = choices
-            payload_questions.append(item)
         response = requests.post(
             API_URL,
             json={
                 "action": "save_custom_questions",
-                "questions": payload_questions,
+                "questions": questions,
                 "admin_key": str(st.secrets.get("ADMIN_PASSWORD", "")),
             },
             timeout=30,
@@ -332,105 +349,7 @@ if not st.session_state.get("shared_questions_loaded", False):
 # 問題データ
 # =========================================================
 
-QUESTION_BANK = [
-    {
-        "field": "核医学",
-        "question": "体内から放出されるγ線を検出して画像化する装置はどれか。",
-        "choices": ["ガンマカメラ", "MRI装置", "超音波診断装置", "一般撮影装置", "リニアック"],
-        "answer": 0,
-        "explanation": "ガンマカメラは、放射性医薬品から放出されるγ線を検出して画像化する装置です。",
-    },
-    {
-        "field": "核医学",
-        "question": "99mTcの物理的半減期として正しいのはどれか。",
-        "choices": ["約6秒", "約6分", "約6時間", "約6日", "約6年"],
-        "answer": 2,
-        "explanation": "99mTcの物理的半減期は約6時間です。核医学検査で広く利用される核種です。",
-    },
-    {
-        "field": "核医学",
-        "question": "PETで消滅放射線として検出する光子のエネルギーはどれか。",
-        "choices": ["140 keV", "364 keV", "511 keV", "662 keV", "1.17 MeV"],
-        "answer": 2,
-        "explanation": "陽電子と電子が対消滅すると、通常は511 keVの光子が2本、ほぼ反対方向に放出されます。",
-    },
-    {
-        "field": "核医学",
-        "question": "肺血流シンチグラフィに用いられる代表的な放射性医薬品はどれか。",
-        "choices": ["99mTc-MAA", "99mTc-DMSA", "123I-MIBG", "18F-FDG", "131I-アドステロール"],
-        "answer": 0,
-        "explanation": "99mTc-MAAは肺毛細血管床に一時的に捕捉されるため、肺血流シンチグラフィに用いられます。",
-    },
-    {
-        "field": "核医学",
-        "question": "腎皮質の形態や局所機能の評価に適している放射性医薬品はどれか。",
-        "choices": ["99mTc-DMSA", "99mTc-MAA", "99mTc-MDP", "123I-IMP", "201TlCl"],
-        "answer": 0,
-        "explanation": "99mTc-DMSAは腎皮質に集積するため、腎皮質シンチグラフィに用いられます。",
-    },
-    {
-        "field": "核医学",
-        "question": "糸球体濾過量（GFR）の評価に用いられる放射性医薬品はどれか。",
-        "choices": ["99mTc-DTPA", "99mTc-MAG3", "99mTc-MAA", "123I-MIBG", "99mTc-MDP"],
-        "answer": 0,
-        "explanation": "99mTc-DTPAは糸球体で濾過されるため、GFRの評価に用いられます。99mTc-MAG3は主に尿細管分泌を反映します。",
-    },
-    {
-        "field": "核医学",
-        "question": "99Mo-99mTcジェネレータから99mTcを取り出す操作はどれか。",
-        "choices": ["溶出", "遠心分離", "昇華", "電気泳動", "蒸留"],
-        "answer": 0,
-        "explanation": "親核種99Moから生成した99mTcを、生理食塩液などで溶出して取り出します。",
-    },
-    {
-        "field": "核医学",
-        "question": "18F-FDG PETで集積が高くなりやすいのはどれか。",
-        "choices": ["糖代謝が亢進した組織", "空気を含む部位", "皮質骨だけ", "集積は血流だけで決まる", "正常組織には全く集積しない"],
-        "answer": 0,
-        "explanation": "18F-FDGはブドウ糖類似体で、糖代謝が亢進した腫瘍などに集積しやすい性質があります。ただし炎症などでも集積することがあります。",
-    },
-    {
-        "field": "核医学",
-        "question": "骨シンチグラフィで一般に用いられる放射性医薬品はどれか。",
-        "choices": ["99mTc-MDP", "99mTc-DMSA", "99mTc-MAA", "123I-MIBG", "123I-IMP"],
-        "answer": 0,
-        "explanation": "99mTc-MDPなどの99mTc標識リン酸化合物は骨代謝に関連して集積し、骨シンチグラフィに用いられます。",
-    },
-    {
-        "field": "核医学",
-        "question": "123I-MIBGシンチグラフィが診断に用いられる代表的な疾患はどれか。",
-        "choices": ["褐色細胞腫", "肺塞栓症", "腎結石", "椎間板ヘルニア", "胆石症"],
-        "answer": 0,
-        "explanation": "123I-MIBGは交感神経系に関連する組織に集積し、褐色細胞腫や神経芽腫などの評価に用いられます。",
-    },
-    {
-        "field": "核医学",
-        "question": "分化型甲状腺癌の放射性ヨウ素内用療法に用いられる核種はどれか。",
-        "choices": ["89Sr", "131I", "99mTc", "123I", "201Tl"],
-        "answer": 1,
-        "explanation": "131Iは分化型甲状腺癌の放射性ヨウ素内用療法に用いられます。",
-    },
-    {
-        "field": "核医学",
-        "question": "SPECTの特徴として正しいのはどれか。",
-        "choices": [
-            "単一方向の投影画像だけを撮影する",
-            "多方向の投影データを収集し、断層像を再構成する",
-            "磁気共鳴信号のみを利用する",
-            "超音波の反射を画像化する",
-            "X線の透過像を得る",
-        ],
-        "answer": 1,
-        "explanation": "SPECTではガンマカメラなどで多方向から投影データを収集し、コンピュータで断層像を再構成します。",
-    },
-    {
-        "field": "核医学",
-        "question": "放射性医薬品の投与後、時間とともに集積や排泄の変化を撮影する検査はどれか。",
-        "choices": ["ダイナミック収集", "単純X線撮影", "MRIのT1強調撮像", "超音波ドプラ法", "マンモグラフィ"],
-        "answer": 0,
-        "explanation": "ダイナミック収集では時間経過に伴う放射能分布の変化を連続的に収集し、血流や臓器機能などを評価します。",
-    },
-]
+QUESTION_BANK = []  # 管理者リセット：固定問題を空にしています。必要な問題は再登録してください。
 
 
 # =========================================================
@@ -1794,25 +1713,7 @@ def show_add_questions():
                 if q.get("question") not in existing_texts:
                     additions.append(q)
                     existing_texts.add(q.get("question"))
-            # Apps Scriptの旧版・新版どちらでも選択肢を保存できるよう、
-            # choices と options の両方を持たせ、answerを0始まりの整数に統一する。
-            normalized_additions = []
-            for item in additions:
-                item = dict(item)
-                choices = item.get("choices")
-                if not isinstance(choices, list):
-                    choices = item.get("options", [])
-                item["choices"] = choices
-                item["options"] = choices
-                item["question"] = str(item.get("question", "")).strip()
-                item["answer"] = int(item.get("answer", -1))
-                item.setdefault("field", field)
-                item.setdefault("question_type", question_type)
-                item.setdefault("explanation", "")
-                item.setdefault("source", "slide")
-                item.setdefault("created_at", datetime.now().isoformat())
-                normalized_additions.append(item)
-            combined = existing_questions + normalized_additions
+            combined = existing_questions + additions
             ok, error_message = save_shared_custom_questions(combined)
             if ok:
                 st.session_state.shared_custom_questions = combined
@@ -2626,6 +2527,15 @@ def show_question_accuracy():
 # =========================================================
 
 def show_quiz():
+
+    if not get_all_questions():
+        st.markdown("## 📚 通常演習")
+        st.warning("現在、出題できる問題がありません。管理者がスライドなどから問題を追加してください。")
+        if st.button("➕ 問題を追加する", type="primary", use_container_width=True):
+            go("add_questions")
+        if st.button("🏠 ホームへ", use_container_width=True):
+            go("home")
+        return
 
     if not st.session_state.quiz_questions:
 
@@ -3505,6 +3415,38 @@ def show_admin_dashboard():
         st.session_state.shared_custom_questions = load_shared_custom_questions()
         st.session_state.shared_questions_loaded = True
         st.rerun()
+    st.markdown("### ⚠️ 全データのリセット")
+    st.warning("固定問題（コード内）、追加問題、Googleスプレッドシートの回答履歴・ユーザー進捗を初期化します。この操作は元に戻せません。先にバックアップを保存してください。")
+    reset_confirmation = st.text_input("実行する場合は RESET ALL と入力", key="reset_all_confirmation")
+    if st.button("🗑️ 全問題・履歴・進捗をリセット", type="secondary", use_container_width=True, key="admin_reset_all_data"):
+        if reset_confirmation.strip() != "RESET ALL":
+            st.error("確認文字が一致しません。RESET ALL と正確に入力してください。")
+        else:
+            with st.spinner("問題・履歴・進捗をリセットしています…"):
+                ok, message = reset_all_learning_data()
+            if ok:
+                st.session_state.shared_custom_questions = []
+                st.session_state.shared_questions_loaded = True
+                st.session_state.custom_questions = []
+                st.session_state.pending_slide_questions = []
+                st.session_state.slide_generated_questions = []
+                st.session_state.review_records = {}
+                st.session_state.road_completed_questions = []
+                st.session_state.total_answered = 0
+                st.session_state.total_correct = 0
+                st.session_state.xp = 0
+                st.session_state.level = 0
+                st.session_state.coins = 0
+                st.session_state.streak = 0
+                st.session_state.quiz_questions = []
+                st.session_state.quiz_index = 0
+                st.session_state.score = 0
+                st.cache_data.clear()
+                st.success(message)
+                st.rerun()
+            else:
+                st.error(message)
+
     if st.button("🔓 ログアウト", use_container_width=True):
         st.session_state.admin_authenticated = False
         go("home")
