@@ -1335,10 +1335,19 @@ div[data-testid="stRadio"] div[role="radiogroup"] > label {
 div[data-testid="stRadio"] div[role="radiogroup"] > label p,
 div[data-testid="stRadio"] div[role="radiogroup"] > label span,
 div[data-testid="stRadio"] div[role="radiogroup"] > label div {
-    color: #111827 !important;
+    color: #050505 !important;
     font-size: 16px !important;
+    font-weight: 800 !important;
     line-height: 1.65 !important;
 }
+div[data-testid="stRadio"] div[role="radiogroup"] > label p,
+div[data-testid="stRadio"] div[role="radiogroup"] > label span,
+div[data-testid="stRadio"] div[role="radiogroup"] > label div {
+    color: #050505 !important;
+    font-weight: 800 !important;
+    opacity: 1 !important;
+}
+
 div[data-testid="stRadio"] div[role="radiogroup"] > label:hover {
     border-color: #2563EB !important;
     background: #EFF6FF !important;
@@ -1393,8 +1402,8 @@ def add_xp(amount):
 
 def start_quiz():
 
-    # 現在登録されている問題から最大30問を出題
-    available_questions = QUESTION_BANK
+    # 固定問題・共有追加問題・このセッションの追加問題から最大30問を出題
+    available_questions = get_all_questions()
     question_count = min(30, len(available_questions))
     st.session_state.quiz_questions = random.sample(
         available_questions,
@@ -2022,13 +2031,9 @@ def show_quiz():
 
     if not st.session_state.quiz_questions:
 
-        question_count = min(30, len(QUESTION_BANK))
-        if question_count == 0:
-            st.error("問題が登録されていません。")
-            return
         st.session_state.quiz_questions = random.sample(
             QUESTION_BANK,
-            question_count
+            5
         )
 
     q = st.session_state.quiz_questions[
