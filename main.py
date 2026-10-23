@@ -156,12 +156,61 @@ def load_admin_dashboard_data():
 
 @st.cache_data(ttl=30, show_spinner=False)
 def load_shared_custom_questions():
-    """Google Apps Scriptから全ユーザー共通の追加問題を取得する。"""
+    """Google Apps Scriptから取得した問題を、通常出題で使う形式にそろえる。"""
     result = sheets_get({"action": "list_custom_questions"})
     if not result:
         return []
     rows = result.get("questions", [])
-    return rows if isinstance(rows, list) else []
+    if not isinstance(rows, list):
+        return []
+
+    normalized = []
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        q = dict(item)
+
+        # Apps Scriptの保存形式は options / answer / explanation。
+        # アプリ内の出題形式 choices と互換にする。
+        choices = q.get("choices")
+        if not isinstance(choices, list):
+            choices = q.get("options", [])
+        if not isinstance(choices, list):
+            choices = []
+        q["choices"] = [str(c) for c in choices]
+
+        q["question"] = str(q.get("question", q.get("問題文", "")) or "").strip()
+        q["explanation"] = str(q.get("explanation", q.get("解説", "")) or "")
+        q["field"] = str(q.get("field", q.get("分野", "その他")) or "その他")
+        q["question_type"] = str(q.get("question_type", "五択") or "五択")
+
+        # 一問一答の正答は保存時に文字列で入る旧形式にも対応。
+        answer = q.get("answer", 0)
+        if isinstance(answer, str):
+            stripped = answer.strip()
+            if stripped.isdigit():
+                answer = int(stripped)
+            elif stripped in q["choices"]:
+                answer = q["choices"].index(stripped)
+            else:
+                answer = 0
+        try:
+            answer = int(answer)
+        except (TypeError, ValueError):
+            answer = 0
+        q["answer"] = answer
+
+        # 破損・形式不明のデータでクイズ画面が停止しないように除外。
+        if not q["question"] or not q["choices"]:
+            continue
+        if not 0 <= q["answer"] < len(q["choices"]):
+            continue
+        if q["question_type"] == "○×" and len(q["choices"]) != 2:
+            q["choices"] = ["○", "×"]
+            q["answer"] = 0 if str(answer) in ("0", "○") else 1
+        normalized.append(q)
+
+    return normalized
 
 
 def save_shared_custom_questions(questions):
