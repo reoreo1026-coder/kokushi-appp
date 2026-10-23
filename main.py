@@ -156,9 +156,9 @@ def load_admin_dashboard_data():
 
 @st.cache_data(ttl=30, show_spinner=False)
 def load_shared_custom_questions():
-    """Google Apps Scriptから取得した問題を、通常出題で使う形式にそろえる。"""
+    """Apps Scriptから追加問題を取得し、通常演習で使える形式に変換する。"""
     result = sheets_get({"action": "list_custom_questions"})
-    if not result:
+    if not isinstance(result, dict):
         return []
     rows = result.get("questions", [])
     if not isinstance(rows, list):
@@ -169,47 +169,57 @@ def load_shared_custom_questions():
         if not isinstance(item, dict):
             continue
         q = dict(item)
+        question_text = q.get("question") or q.get("問題文") or q.get("問題") or ""
+        question_text = str(question_text).strip()
+        raw_choices = q.get("choices")
+        if not isinstance(raw_choices, list):
+            raw_choices = q.get("options")
+        if not isinstance(raw_choices, list):
+            raw_choices = [q.get(f"選択肢{i}", q.get(f"option{i}")) for i in range(1, 6)]
+        choices = [str(x).strip() for x in raw_choices if x is not None and str(x).strip()]
+        q["question"] = question_text
+        q["choices"] = choices
+        q["explanation"] = str(q.get("explanation") or q.get("解説") or "")
+        q["field"] = str(q.get("field") or q.get("分野") or "その他")
+        q["question_type"] = str(q.get("question_type") or q.get("問題形式") or "五択")
 
-        # Apps Scriptの保存形式は options / answer / explanation。
-        # アプリ内の出題形式 choices と互換にする。
-        choices = q.get("choices")
-        if not isinstance(choices, list):
-            choices = q.get("options", [])
-        if not isinstance(choices, list):
-            choices = []
-        q["choices"] = [str(c) for c in choices]
-
-        q["question"] = str(q.get("question", q.get("問題文", "")) or "").strip()
-        q["explanation"] = str(q.get("explanation", q.get("解説", "")) or "")
-        q["field"] = str(q.get("field", q.get("分野", "その他")) or "その他")
-        q["question_type"] = str(q.get("question_type", "五択") or "五択")
-
-        # 一問一答の正答は保存時に文字列で入る旧形式にも対応。
-        answer = q.get("answer", 0)
-        if isinstance(answer, str):
-            stripped = answer.strip()
-            if stripped.isdigit():
-                answer = int(stripped)
-            elif stripped in q["choices"]:
-                answer = q["choices"].index(stripped)
-            else:
-                answer = 0
-        try:
-            answer = int(answer)
-        except (TypeError, ValueError):
-            answer = 0
-        q["answer"] = answer
-
-        # 破損・形式不明のデータでクイズ画面が停止しないように除外。
-        if not q["question"] or not q["choices"]:
-            continue
-        if not 0 <= q["answer"] < len(q["choices"]):
-            continue
-        if q["question_type"] == "○×" and len(q["choices"]) != 2:
+        answer = q.get("answer", q.get("答え", q.get("正解", 0)))
+        # ○×形式は選択肢の並びに依存しないように整える。
+        if q["question_type"] in ("○×", "〇×", "正誤", "true_false"):
+            q["question_type"] = "○×"
             q["choices"] = ["○", "×"]
-            q["answer"] = 0 if str(answer) in ("0", "○") else 1
-        normalized.append(q)
+            a = str(answer).strip().lower()
+            if a in ("○", "〇", "まる", "true", "正", "1"):
+                answer = 0
+            elif a in ("×", "ばつ", "false", "誤", "2"):
+                answer = 1
+            else:
+                try:
+                    answer = int(answer)
+                    answer = 0 if answer == 0 else 1
+                except (TypeError, ValueError):
+                    answer = 0
+        else:
+            if isinstance(answer, str):
+                a = answer.strip()
+                if a in choices:
+                    answer = choices.index(a)
+                else:
+                    try:
+                        answer = int(a)
+                    except (TypeError, ValueError):
+                        answer = -1
+            try:
+                answer = int(answer)
+            except (TypeError, ValueError):
+                answer = -1
 
+        q["answer"] = answer
+        if not question_text or not choices:
+            continue
+        if not 0 <= answer < len(choices):
+            continue
+        normalized.append(q)
     return normalized
 
 
@@ -3464,7 +3474,9 @@ def show_admin_dashboard():
     if st.button("📥 スライドから問題を追加・管理", type="primary", use_container_width=True):
         go("add_questions")
     if st.button("🔄 問題バンクを再読み込み", use_container_width=True):
+        st.cache_data.clear()
         st.session_state.shared_custom_questions = load_shared_custom_questions()
+        st.session_state.shared_questions_loaded = True
         st.rerun()
     if st.button("🔓 ログアウト", use_container_width=True):
         st.session_state.admin_authenticated = False
