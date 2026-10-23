@@ -117,6 +117,7 @@ def send_result(q, selected_index, is_correct, confidence):
         return False
 
 
+@st.cache_data(ttl=30, show_spinner=False)
 def get_leaderboard():
     """ユーザー別ランキングを取得する。"""
     result = sheets_get({"action": "leaderboard"})
@@ -127,6 +128,7 @@ def get_leaderboard():
 
 
 
+@st.cache_data(ttl=30, show_spinner=False)
 def load_admin_dashboard_data():
     """管理者認証付きで、スプレッドシート上の全ユーザー学習状況を取得する。"""
     if not sheets_url_ready():
@@ -152,6 +154,7 @@ def load_admin_dashboard_data():
         return None, f"スプレッドシートから学習状況を取得できませんでした：{exc}"
 
 
+@st.cache_data(ttl=30, show_spinner=False)
 def load_shared_custom_questions():
     """Google Apps Scriptから全ユーザー共通の追加問題を取得する。"""
     result = sheets_get({"action": "list_custom_questions"})
@@ -178,6 +181,7 @@ def save_shared_custom_questions(questions):
         response.raise_for_status()
         result = response.json()
         if result.get("status") == "success":
+            st.cache_data.clear()
             return True, ""
         return False, result.get("message", "Apps Script側で保存が拒否されました。")
     except (requests.RequestException, ValueError) as e:
@@ -190,7 +194,7 @@ def save_shared_custom_questions(questions):
 st.set_page_config(
     page_title="国試トレーナー",
     page_icon="🎓",
-    layout="centered",
+    layout="wide",
     initial_sidebar_state="collapsed",
 )
 
@@ -1472,6 +1476,84 @@ div.stButton > button:hover {
 
 }
 
+
+</style>
+<style>
+/* モバイル優先：読みやすさ・タップしやすさ・タブレット対応 */
+html { font-size: 16px !important; }
+body, [data-testid="stApp"], [data-testid="stAppViewContainer"] {
+    font-size: 16px !important;
+    line-height: 1.6 !important;
+}
+.block-container {
+    width: min(760px, 100%) !important;
+    max-width: 760px !important;
+    padding: 16px 18px 28px !important;
+    margin: 0 auto !important;
+}
+[data-testid="stMarkdownContainer"] p,
+[data-testid="stMarkdownContainer"] li,
+[data-testid="stCaptionContainer"],
+[data-testid="stWidgetLabel"] {
+    font-size: 1rem !important;
+    line-height: 1.65 !important;
+}
+h1 { font-size: clamp(1.55rem, 5vw, 2rem) !important; line-height: 1.3 !important; }
+h2 { font-size: clamp(1.3rem, 4.5vw, 1.65rem) !important; line-height: 1.35 !important; }
+h3 { font-size: clamp(1.12rem, 4vw, 1.35rem) !important; line-height: 1.4 !important; }
+button, [data-testid="stBaseButton"], [data-testid="stDownloadButton"] button {
+    min-height: 44px !important;
+    font-size: 1rem !important;
+}
+input, textarea, [data-baseweb="select"] {
+    font-size: 16px !important;
+}
+[data-testid="stRadio"] label,
+[data-testid="stCheckbox"] label {
+    font-size: 1rem !important;
+    line-height: 1.5 !important;
+}
+[data-testid="stMetricValue"] { font-size: clamp(1.25rem, 4vw, 1.7rem) !important; }
+[data-testid="stDataFrame"], [data-testid="stTable"] {
+    font-size: 0.9rem !important;
+}
+/* 小さすぎる固定フォントだけを底上げ。装飾用の大きな文字は維持 */
+[style*="font-size: 3px"], [style*="font-size:3px"],
+[style*="font-size: 4px"], [style*="font-size:4px"],
+[style*="font-size: 5px"], [style*="font-size:5px"],
+[style*="font-size: 6px"], [style*="font-size:6px"],
+[style*="font-size: 7px"], [style*="font-size:7px"],
+[style*="font-size: 8px"], [style*="font-size:8px"] {
+    font-size: 12px !important;
+    line-height: 1.45 !important;
+}
+@media (max-width: 600px) {
+    .block-container {
+        width: 100% !important;
+        max-width: 100% !important;
+        padding: 12px 12px 24px !important;
+    }
+    [data-testid="stHorizontalBlock"] {
+        gap: 0.55rem !important;
+    }
+    [data-testid="stMetric"] {
+        padding: 10px !important;
+    }
+    [data-testid="stMetricLabel"] { font-size: 0.82rem !important; }
+    [data-testid="stMetricValue"] { font-size: 1.2rem !important; }
+    [data-testid="stDataFrame"] { overflow-x: auto !important; }
+    /* 画面幅が狭い場合もフォーム部品は画面内に収める */
+    input, textarea, [data-baseweb="select"], button {
+        max-width: 100% !important;
+    }
+}
+@media (min-width: 601px) and (max-width: 1024px) {
+    .block-container {
+        width: min(760px, 100%) !important;
+        max-width: 760px !important;
+        padding: 18px 24px 30px !important;
+    }
+}
 </style>
 """, unsafe_allow_html=True)
 
