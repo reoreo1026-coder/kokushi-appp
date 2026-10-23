@@ -1793,17 +1793,17 @@ def start_quiz():
             if due_at is not None and due_at <= now:
                 due_questions.append(q)
 
-    # 苦手問題と期限到来問題を優先。重複を避けて5問まで選ぶ。
+    # 苦手問題と期限到来問題を優先。重複を避けて最大30問選ぶ。
     priority = {}
     for q in weak_questions + due_questions:
         priority[q.get("question")] = q
     selected = list(priority.values())
     random.shuffle(selected)
-    selected = selected[:5]
+    selected = selected[:30]
     selected_keys = {q.get("question") for q in selected}
     remaining = [q for q in get_all_questions() if q.get("question") not in selected_keys]
     random.shuffle(remaining)
-    selected.extend(remaining[:max(0, 5 - len(selected))])
+    selected.extend(remaining[:max(0, 30 - len(selected))])
 
     st.session_state.quiz_questions = selected
     st.session_state.quiz_mode = "normal"
@@ -2218,7 +2218,7 @@ margin-left:auto;
 color:#8196aa;
 font-size:5px;
 ">
-まずは5問挑戦
+まずは30問挑戦
 </div>
 
 </div>
@@ -2291,7 +2291,7 @@ STAGE 1　FIRST STEP
 </div>
 
 <div class="match-info">
-核医学・5問 / 1セット
+最大30問 / 1セット
 </div>
 
 </div>
@@ -2324,7 +2324,7 @@ STAGE 1　FIRST STEP
 
 <div class="mission-box">
 <div class="mission-title">
-5問解く
+30問解く
 </div>
 <div class="mission-progress">
 <div class="mission-fill" style="width:0%"></div>
@@ -2454,7 +2454,7 @@ STAGE 1　FIRST STEP
         if st.button("📝 スライド問題を解く", use_container_width=True, key="home_solve_slide_questions"):
             qs = list(st.session_state.custom_questions)
             random.shuffle(qs)
-            st.session_state.quiz_questions = qs[:5]
+            st.session_state.quiz_questions = qs[:30]
             st.session_state.quiz_mode = "normal"
             reset_quiz_state()
             go("quiz")
