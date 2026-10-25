@@ -250,16 +250,56 @@ def reset_all_learning_data():
 
 
 def save_shared_custom_questions(questions):
-    """管理者が承認した追加問題をGoogle Apps Scriptへ保存する。"""
+    """管理者が承認した追加問題をGoogle Apps Scriptへ保存する。
+    choices/options の両方を送信し、Apps Script側の旧形式との不一致を防ぐ。
+    """
     if not sheets_url_ready():
         return False, "Google Sheets連携URLが設定されていません。"
+
+    # Gemini生成問題を、送信前に共通の形式へ整える。
+    payload_questions = []
+    for index, original in enumerate(questions or []):
+        if not isinstance(original, dict):
+            continue
+        q = dict(original)
+        choices = q.get("choices")
+        if not isinstance(choices, list):
+            choices = q.get("options")
+        if not isinstance(choices, list):
+            choices = []
+        choices = [str(choice).strip() for choice in choices if choice is not None and str(choice).strip()]
+
+        # Apps Scriptのバージョン差に備えて両方のキーを渡す。
+        q["choices"] = choices
+        q["options"] = choices
+        q["question"] = str(q.get("question") or q.get("問題文") or "").strip()
+        q["field"] = str(q.get("field") or q.get("分野") or "その他")
+        q["explanation"] = str(q.get("explanation") or q.get("解説") or "")
+        q["question_type"] = str(q.get("question_type") or q.get("問題形式") or "五択")
+
+        if not q["question"]:
+            continue
+        if q["question_type"] != "一問一答" and not choices:
+            return False, f"{index + 1}問目の選択肢が空です。問題を作り直してから登録してください。"
+        payload_questions.append(q)
+
+    if not payload_questions:
+        return False, "登録できる問題がありません。問題文と選択肢を確認してください。"
+
+    try:
+        admin_password = str(st.secrets.get("ADMIN_PASSWORD", ""))
+    except Exception:
+        admin_password = ""
+    if not admin_password:
+        return False, "管理者パスワードが取得できません。Streamlit Cloud の Secrets に ADMIN_PASSWORD を設定してください。"
+
     try:
         response = requests.post(
             API_URL,
             json={
                 "action": "save_custom_questions",
-                "questions": questions,
-                "admin_key": str(st.secrets.get("ADMIN_PASSWORD", "")),
+                "questions": payload_questions,
+                "admin_key": admin_password,
             },
             timeout=30,
         )
@@ -267,7 +307,8 @@ def save_shared_custom_questions(questions):
         result = response.json()
         if result.get("status") == "success":
             st.cache_data.clear()
-            return True, ""
+            saved_count = result.get("saved_count", len(payload_questions))
+            return True, f"{saved_count}問をGoogleスプレッドシートへ送信しました。"
         return False, result.get("message", "Apps Script側で保存が拒否されました。")
     except (requests.RequestException, ValueError) as e:
         return False, f"問題の保存に失敗しました: {e}"
@@ -1718,7 +1759,8 @@ def show_add_questions():
             if ok:
                 st.session_state.shared_custom_questions = combined
                 st.session_state.pending_slide_questions = []
-                st.success(f"{len(additions)}問を問題バンクに登録しました。通常の学習問題にも反映されます。")
+                st.success(f"{len(additions)}問の保存リクエストが成功しました。")
+                st.info("登録数は直後にGoogleスプレッドシートから再読み込みして確認します。")
             else:
                 st.error(error_message)
                 st.info("共有保存には、下記の案内にあるApps Script側の追加対応が必要です。")
